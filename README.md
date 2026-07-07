@@ -201,6 +201,16 @@ regenerates them locally in under a minute.
   it reaches `jsonify`, so the numpy-to-JSON conversion goes through Plotly's encoder
   instead of Flask's.
 
+- **TikZ line breaks silently produced a tabular-style error, not a line break.** The
+  Deep Dive PDF's `app.py` request-cycle diagram uses multi-line edge labels like
+  `node[below]{4. rendered HTML +\\initial JSON payload}`. Without `align=center` set
+  on that specific node, TikZ's `\\` doesn't act as a plain line break; it's
+  interpreted the way `\\` behaves inside a tabular row, which produced three
+  `! LaTeX Error: Something's wrong--perhaps a missing \item.` failures on every
+  compile of `docs/explainers/deep-dive.pdf`, even though the picture still rendered
+  something and the error was easy to miss in a long `pdflatex` log. Fixed by adding
+  `align=center` to each multi-line edge-label node in that diagram.
+
 ## What I learned
 
 - `reset_index()` after a `groupby()` or `value_counts()` names the new column after
