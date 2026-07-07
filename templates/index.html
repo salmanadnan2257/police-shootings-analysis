@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Police Shootings Dashboard</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --accent: #2563eb;
+      --border: #e2e8f0;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b1220;
+        --card: #131c2e;
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #60a5fa;
+        --border: #24324a;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+    }
+    .wrap { max-width: 1100px; margin: 0 auto; }
+    h1 { font-size: 1.6rem; margin-bottom: 4px; }
+    p.sub { color: var(--muted); margin-top: 0; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .filters {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      align-items: end;
+    }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; }
+    select {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+    button#reset-btn {
+      padding: 8px 14px;
+      border-radius: 6px;
+      border: 1px solid var(--accent);
+      background: transparent;
+      color: var(--accent);
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    button#reset-btn:hover { background: var(--accent); color: white; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 16px;
+    }
+    .stat .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+    .stat .value { font-size: 1.3rem; font-weight: 600; }
+    .charts-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+    }
+    @media (max-width: 800px) {
+      .charts-row { grid-template-columns: 1fr; }
+    }
+    footer { color: var(--muted); font-size: 0.85rem; margin-top: 8px; }
+    #loading-indicator {
+      font-size: 0.85rem;
+      color: var(--accent);
+      visibility: hidden;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Police Shootings Dashboard</h1>
+    <p class="sub">
+      {{ total_records }} fatal police shooting records (Washington Post dataset,
+      2015 through part of 2017). Filter by state, year, or armed status; every
+      chart below recomputes from the filtered rows, and the map, year, and
+      city charts all support real hover/zoom/click.
+    </p>
+
+    <div class="card">
+      <div class="filters">
+        <div>
+          <label for="state-select">State</label>
+          <select id="state-select">
+            <option value="all">All states</option>
+            {% for s in states %}
+            <option value="{{ s }}">{{ s }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="year-select">Year</label>
+          <select id="year-select">
+            <option value="all">All years</option>
+            {% for y in years %}
+            <option value="{{ y }}">{{ y }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="armed-select">Armed status</label>
+          <select id="armed-select">
+            <option value="all">All statuses</option>
+            {% for a in armed_types %}
+            <option value="{{ a }}">{{ a }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <button id="reset-btn">Reset filters</button>
+        </div>
+      </div>
+      <p id="loading-indicator">Updating&hellip;</p>
+    </div>
+
+    <div class="card">
+      <div class="grid">
+        <div class="stat">
+          <div class="label">Records (current filter)</div>
+          <div class="value" id="stat-total">-</div>
+        </div>
+        <div class="stat">
+          <div class="label">Signs of mental illness</div>
+          <div class="value" id="stat-mental">-</div>
+        </div>
+        <div class="stat">
+          <div class="label">Most-affected state</div>
+          <div class="value" id="stat-state">-</div>
+        </div>
+        <div class="stat">
+          <div class="label">Most common armed status</div>
+          <div class="value" id="stat-armed">-</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div id="choropleth-plot"></div>
+    </div>
+
+    <div class="charts-row">
+      <div class="card">
+        <div id="year-plot"></div>
+      </div>
+      <div class="card">
+        <div id="city-plot"></div>
+      </div>
+    </div>
+
+    <footer>
+      Data and framing: see the README. This is a fixed historical extract (2,535
+      records, 2015 through part of 2017), not live data. Nothing here establishes
+      causation; some filter combinations narrow to a handful of records.
+    </footer>
+  </div>
+
+  <script>
+    const initialPayload = {{ initial_payload_json | safe }};
+
+    const stateSelect = document.getElementById('state-select');
+    const yearSelect = document.getElementById('year-select');
+    const armedSelect = document.getElementById('armed-select');
+    const resetBtn = document.getElementById('reset-btn');
+    const loadingIndicator = document.getElementById('loading-indicator');
+
+    const plotConfig = { responsive: true, displaylogo: false };
+
+    function renderPayload(payload) {
+      Plotly.react('choropleth-plot', payload.choropleth.data, payload.choropleth.layout, plotConfig);
+      Plotly.react('year-plot', payload.year_chart.data, payload.year_chart.layout, plotConfig);
+      Plotly.react('city-plot', payload.city_chart.data, payload.city_chart.layout, plotConfig);
+
+      const stats = payload.stats;
+      document.getElementById('stat-total').textContent = stats.total;
+      document.getElementById('stat-mental').textContent =
+        stats.pct_mental_illness === null ? 'n/a' : `${stats.pct_mental_illness}%`;
+      document.getElementById('stat-state').textContent = stats.top_state || 'n/a';
+      document.getElementById('stat-armed').textContent = stats.top_armed || 'n/a';
+    }
+
+    async function fetchAndRender() {
+      loadingIndicator.style.visibility = 'visible';
+      const params = new URLSearchParams({
+        state: stateSelect.value,
+        year: yearSelect.value,
+        armed: armedSelect.value,
+      });
+      try {
+        const response = await fetch(`/api/charts?${params.toString()}`);
+        const payload = await response.json();
+        renderPayload(payload);
+      } finally {
+        loadingIndicator.style.visibility = 'hidden';
+      }
+    }
+
+    stateSelect.addEventListener('change', fetchAndRender);
+    yearSelect.addEventListener('change', fetchAndRender);
+    armedSelect.addEventListener('change', fetchAndRender);
+
+    resetBtn.addEventListener('click', () => {
+      stateSelect.value = 'all';
+      yearSelect.value = 'all';
+      armedSelect.value = 'all';
+      fetchAndRender();
+    });
+
+    // Initial render from the server-computed payload (no extra round trip on load).
+    renderPayload(initialPayload);
+
+    // Clicking a state on the map filters everything else to it.
+    document.getElementById('choropleth-plot').on('plotly_click', (evt) => {
+      const point = evt.points && evt.points[0];
+      if (!point) return;
+      const clicked = point.location;
+      if (stateSelect.value === clicked) {
+        stateSelect.value = 'all';
+      } else {
+        stateSelect.value = clicked;
+      }
+      fetchAndRender();
+    });
+  </script>
+</body>
+</html>
