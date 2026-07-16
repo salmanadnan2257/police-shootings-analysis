@@ -1,0 +1,343 @@
+% explainer-source-hash: eb78dcea1059a3fad077ff13dc88bb7062fcb0ae354b0341bf97777c95f2d653
+% explainer-source-commit: df2470cbd060525eba573923539bceac51b89a13
+% explainer-generated: 2026-07-16
+% Regenerate with /explain-all (see WIRING.md). Do not edit this stamp by hand:
+% it is how the toolchain knows whether this document still matches the code.
+\documentclass[11pt,a4paper]{article}
+\input{preamble}
+
+\title{\vspace{-1.5cm}\textbf{Police Shootings Analysis}\\[0.3em]
+\large A Brief: what it does, what it gets right, and what is broken}
+\author{Explainer for \file{police-shootings-analysis}}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\section*{In one paragraph}
+
+\file{police-shootings-analysis} reads five fixed CSV files and turns them into charts, two
+different ways. A single 392-line script, \file{analyse\_deaths.py}, writes 24 static chart
+files and exits. A small Flask web app, \file{app.py}, serves three of the same views as an
+interactive dashboard that filters by state, year, and armed status. It began as a guided
+Udemy exercise about joining messy real-world data and comparing three plotting libraries.
+The dashboard is later, better work built beside it. The two halves share one CSV file on
+disk and essentially no code.
+
+\begin{honest}{The subject, and the headline finding}
+Every row of the main dataset is a person who was killed. This document treats that data
+descriptively and states its limits rather than repeating chart titles on trust.
+
+The single most important thing to know about this project: \textbf{three of its 24 charts
+are titled ``High School Graduation Rate by State'' and actually plot the number of cities
+per state}, on a y-axis running to 1750. One of them is committed to the repository as a PNG.
+The cause is \code{.count()} where \code{.mean()} was meant. The fix is one word. It is
+covered in the ``What is broken'' section, and in full in the Deep Dive.
+\end{honest}
+
+\section{What the data can and cannot say}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}p{6.5cm}p{8.5cm}@{}}
+\toprule
+\textbf{What it is} & \textbf{What that means} \\
+\midrule
+A fixed extract of The Washington Post's fatal-police-shootings database: 2,535 records,
+2015 through part of 2017.
+& Not live, not current, and the code has no way to fetch an update. A chart titled
+``Killings by Year'' stops in 2017 and cannot know that. \\
+\addlinespace
+Four city-level Census snapshots from around 2015 (poverty, high school completion, race
+share, income).
+& Static too. And the fatality data is never actually joined to any of them, despite the
+README's framing. \\
+\addlinespace
+Counts of \emph{records}. & Not counts of events. Anything that shaped what got reported is
+invisible here. \\
+\addlinespace
+Raw totals with no population denominator. & The map and the ``top 10 cities'' chart
+substantially rank by population. California leads at 424 records and is the most populous
+state. A code comment asks ``which cities are the most dangerous''; the chart cannot answer
+that. \\
+\addlinespace
+Correlations. & Never causation. The strongest relationship in the project, city poverty
+against city high school completion, is about $-0.50$, verified. That is an association and
+nothing more. \\
+\addlinespace
+Some very small cells. & The race-by-top-10-city chart's bars hold between 10 and 21 records
+each, verified. Nothing stable survives at that size. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Architecture}
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tikzpicture}[node distance=8mm]
+  \node[store] (deaths) {Deaths\_by\_Police\_US.csv\\2,535 rows};
+  \node[store, below=16mm of deaths] (census) {3 Census CSVs used\\+ 1 loaded and ignored};
+
+  \node[box, right=32mm of deaths, minimum width=26mm] (datapy) {data.py};
+  \node[box, right=24mm of datapy, minimum width=24mm] (apppy) {app.py\\\scriptsize Flask};
+  \node[box, right=24mm of apppy, minimum width=26mm] (html) {index.html\\\scriptsize Plotly.react};
+
+  \node[box, right=32mm of census, minimum width=32mm] (script) {analyse\_deaths.py};
+  \node[store, right=42mm of script] (out) {output/\\18 PNG + 6 HTML};
+
+  \draw[flow] (deaths) -- (datapy);
+  \draw[flow] (datapy) -- node[lbl,above,align=center]{clean once\\at startup} (apppy);
+  \draw[flow] (apppy) -- node[lbl,above,align=center]{figure JSON} (html);
+  \draw[flow] (census) -- (script);
+  \draw[flow] (script) -- node[lbl,above,align=center]{savefig /\\write\_html} (out);
+  \draw[flow] (deaths.south west) to[out=205,in=155] node[lbl,left,align=center]{re-read and\\re-cleaned\\independently} (script.west);
+
+  \begin{scope}[on background layer]
+    \node[fit=(datapy)(apppy)(html), draw=accent, dashed, rounded corners,
+          inner sep=5mm, label={[lbl]above:the dashboard: careful code}] {};
+    \node[fit=(script)(out), draw=inkblue, dashed, rounded corners,
+          inner sep=4mm, label={[lbl]below:the original exercise: unreviewed}] {};
+  \end{scope}
+\end{tikzpicture}}
+\caption{Two entry points sharing a file, not a code path. The curved arrow is the whole
+problem: \file{analyse\_deaths.py} does not import \file{data.py}, so the two halves keep
+duplicate copies of the same cleaning logic and can drift apart.}
+\end{figure}
+
+\begin{keyidea}{The shape to remember}
+\file{data.py} is described in its own docstring as the single home of the cleaning logic. It
+is the single home of that logic \emph{for the dashboard}. \file{analyse\_deaths.py} still
+has its own inline copy and imports nothing. The abstraction was extracted for the new code;
+the old code was left pointing at a duplicate.
+\end{keyidea}
+
+\subsection{The static script}
+
+Straight-line code, no classes, two small functions. Four decisions define it:
+
+\begin{enumerate}
+  \item \code{matplotlib.use('Agg')} on line 2, before \code{pyplot} is imported. This is the
+  single most valuable change made to the original notebook exercise: it makes the script
+  run anywhere, with no display, writing durable files instead of opening windows that never
+  appear.
+  \item A global counter, \code{next\_chart\_path()}, names every output \code{chart\_NN}. The
+  numbering is pure execution order, so the PNGs are only meaningful alongside the exact
+  script version that made them, and nothing enforces that pairing.
+  \item \code{fillna(0)} on all five dataframes, before any numeric coercion. This one is a
+  bug and is covered below.
+  \item The same chart drawn in matplotlib, seaborn, and plotly, which is the actual point of
+  the exercise.
+\end{enumerate}
+
+Charts 01--12 come from the Census data. Charts 13--24 come from the fatality data. The two
+groups never meet.
+
+\subsection{The dashboard}
+
+\file{data.py} loads and cleans once and exposes \code{apply\_filters()}. \file{app.py} holds
+the cleaned dataframe in memory at import time, and on each request filters it and rebuilds
+three Plotly figures (a choropleth, a year bar chart, a top-10-cities bar chart) plus a
+four-value stat row. \file{templates/index.html} server-renders the first payload, then calls
+\code{GET /api/charts} on every filter change and updates the charts in place with
+\code{Plotly.react}, so hover and zoom survive and nothing is a static image. Clicking a
+state on the map sets the state dropdown and re-fetches, so the map and the dropdown cannot
+disagree.
+
+\section{Verified by running it}
+
+Everything here came from a clean virtual environment built from \file{requirements.txt}, not
+from the README.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}p{6.2cm}p{5.4cm}p{3.4cm}@{}}
+\toprule
+\textbf{Claim} & \textbf{Result} & \textbf{Verdict} \\
+\midrule
+2,535 records; 2,428 M / 107 F & as stated & confirmed \\
+633 of 2,535 with signs of mental illness & 25.0\% & confirmed \\
+Top armed: gun 1,398, knife 373, vehicle 177 & as stated & confirmed \\
+Top states: CA 424, TX 225, FL 154 & as stated & confirmed \\
+24 charts produced (18 PNG, 6 HTML, 31 MB) & as stated & confirmed \\
+Dashboard, including the zero-row filter case & renders, shows n/a & confirmed \\
+\midrule
+Killings per year & \textbf{991 / 963 / 581}, not 991 / 962 / 582 & \textbf{README wrong} \\
+``regenerates in under a minute'' & \textbf{6 min 54 s} & \textbf{README wrong} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{What is broken}
+
+\begin{honest}{1. Three charts plot the wrong quantity (charts 04, 05, 06)}
+\code{groupby('Geographic Area')['percent\_completed\_hs'].count()} counts rows per state. It
+never looks at the column's values. \code{.mean()} is what a rate needs.
+
+So three charts titled ``High School Graduation Rate by State'' plot how many cities each
+state has. Rendered and read: the y-axis reaches 1750, the tallest bars are PA 1,761, TX
+1,710, CA 1,501, and the shortest is DC at 1, because DC contributes one city row. Chart 04
+is committed to the repository.
+
+The tell was available: chart 07, in the same script, plots the same quantity correctly via
+seaborn's implicit mean, topping out near 100. Two charts in one document disagree by a
+factor of 17. Nothing noticed, because the project has no tests at all.
+\end{honest}
+
+\begin{honest}{2. The income dataset is loaded and never used, and nothing is cross-referenced}
+The README's first sentence says the fatality data is ``cross-referenced against four US
+Census datasets $\ldots$ to look for socioeconomic patterns''.
+
+\code{df\_hh\_income} appears twice in the whole project: line 37 reads the 709 KB file, line
+46 calls \code{fillna(0)} on it. Nothing reads it again. Verified by grep.
+
+The larger version, which an interviewer will reach: \textbf{the fatality data is never
+joined to any Census data at all}. The Census charts and the fatality charts are two separate
+analyses sharing a script. The cross-reference is an aspiration, not a feature.
+\end{honest}
+
+\begin{honest}{3. \code{fillna(0)} runs before the coercion meant to catch bad values}
+Because missing cells become the number 0 first, the \code{errors='coerce'} that was supposed
+to turn them into NaN never sees them. Verified consequences: \textbf{77 records with no
+recorded age are plotted as zero-year-olds} in the age histogram and KDE (chart 17), pulling
+the density curve left with no visual cue that the points are fabricated; and \textbf{195
+records with no recorded race become a bar literally labelled \code{0}} in chart 18.
+
+The inline comment above those lines reads ``Replace 0 with NaN''. The code does the exact
+opposite, and the two operations have opposite consequences.
+
+\file{data.py} inherited the same inverted order, so both halves share it. In the dashboard's
+favour: \file{app.py} and \file{data.py} both explicitly strip the \code{0} values at the
+point of use, so the author did notice the symptom there and patched it locally rather than
+at the source. The script never got that treatment.
+\end{honest}
+
+\begin{honest}{4. Chart 12 is not stacked, and the README says it is}
+The loop draws five bar series at \code{alpha=0.7} and never passes \code{bottom=}, so all
+five start at zero and overplot each other. Rendered and confirmed: the White bar covers
+almost everything drawn after it. A reader who expects a stacked chart reads a bar at 92 as a
+cumulative total when it means ``the White share is 92''.
+
+The underlying arithmetic is also an unweighted mean across cities, so a village counts as
+much as a city of 800,000. Defensible, but never acknowledged.
+\end{honest}
+
+\begin{honest}{5. \code{scatter=\{'alpha': ...\}} does nothing (charts 10, 11)}
+Verified against the installed seaborn 0.13.2 signature: \code{regplot} and \code{lmplot}
+take \code{scatter} as a \textbf{boolean}, and \code{scatter\_kws} as the styling dict. A
+non-empty dict is truthy, so the alpha is silently discarded and no error is raised. The
+author knew the right pattern: \code{line\_kws=\{'color': 'red'\}} sits right beside it and
+works correctly. So two scatter plots of 29,329 points render at full opacity when
+transparency was intended.
+\end{honest}
+
+\subsection{Smaller ones}
+
+\begin{itemize}
+  \item \textbf{\code{convert\_country\_code} is a guarded no-op}, kept alive purely to
+  support chart 23, a world-scope map plotting US state postal codes onto countries. Chart 23
+  is not meaningful and \code{pycountry} exists in \file{requirements.txt} only for it. (That
+  some state codes collide with real ISO country codes and are therefore silently rewritten
+  follows from \code{pycountry}'s contract but was \textbf{not measured} on this dataset:
+  treat it as inferred.)
+  \item \textbf{Chart 01 does not aggregate.} matplotlib is handed 29,329 city rows and draws
+  them all onto 50 x-positions. Chart 02, the seaborn version of the same title, averages per
+  state. Two charts, same title, different quantities.
+  \item \textbf{\code{GET /} ignores its query string}, so a filtered view has no URL and
+  cannot be bookmarked or shared. \code{/api/charts} already parses exactly those parameters
+  correctly.
+  \item \textbf{The Plotly CDN} is an unpinned single point of failure with no integrity
+  hash, so a local dashboard over local data needs the internet to draw anything.
+  \item \textbf{\code{fetchAndRender} has no \code{catch}}, so a failed request leaves stale
+  charts on screen that no longer match the dropdowns.
+  \item \textbf{No tests and no schema validation.} This is the root cause of items 1 through 5.
+\end{itemize}
+
+\section{What it gets right}
+
+\begin{itemize}
+  \item The headless \code{Agg} backend plus file output is what makes the script
+  reproducible at all. It was a real fix to a real problem.
+  \item \code{base\_path} from \code{sys.argv[0]}: the script finds its data from any working
+  directory.
+  \item Exact version pins on every dependency, including \code{scipy}, which the project
+  \emph{never imports} and cannot run without: both KDE charts delegate to
+  \code{scipy.stats.gaussian\_kde} lazily at draw time. Declaring a behavioural dependency
+  the import graph does not show is exactly right.
+  \item \code{format='mixed'} on the date column, which genuinely mixes \code{M/D/YYYY} and
+  \code{DD/MM/YY}. Verified to parse all 2,535 rows with zero failures.
+  \item \code{fig\_to\_json} routes Plotly figures through Plotly's own encoder, sidestepping
+  a real Flask/numpy serialization failure before it could happen at request time.
+  \item \code{build\_stats} handles the empty selection. Tested: it returns nulls and the page
+  shows ``n/a'' instead of raising \code{IndexError}.
+  \item The \code{\# noqa: E712} on \code{== True} is the author correctly overruling the
+  linter: on a pandas Series that is a vectorised comparison and \code{is True} would be wrong.
+  \item Map clicks route \emph{through} the dropdown rather than around it, so two controls
+  over one piece of state cannot disagree.
+  \item The README's ``Data and framing notes'' and the dashboard footer both state the
+  causation and sample-size limits unprompted. On this subject that matters, and most
+  exercise write-ups skip it.
+\end{itemize}
+
+\section{The fix list}
+
+\begin{enumerate}
+  \item \code{.count()} to \code{.mean()} at line 89. One word, fixes three false charts.
+  \item Move \code{fillna(0)} after the coercions, or delete it. Fixes charts 17 and 18, in
+  both entry points.
+  \item Use \code{df\_hh\_income} or delete it, and rewrite the README's ``four Census
+  datasets $\ldots$ cross-referenced'' to describe what the code does.
+  \item Pass \code{bottom=} in the chart 12 loop, or stop calling it stacked.
+  \item \code{scatter=} to \code{scatter\_kws=} in charts 10 and 11.
+  \item Delete \code{convert\_country\_code}, chart 23, and \code{pycountry}.
+  \item Correct the README's year counts and its runtime claim.
+  \item Give each chart a function and a name; add one test that asserts a rate chart's
+  maximum is under 100.
+\end{enumerate}
+
+\begin{keyidea}{The defence, in one line}
+The dashboard half is careful, well-factored code with real thought in it. The static-script
+half is an exercise that was made to run headlessly and then never looked at again, and it
+contains three charts that are confidently, visibly false. The gap between the two is the
+whole story, and the reason for the gap is that neither half has a single test.
+\end{keyidea}
+
+\section*{Glossary}
+
+\begin{description}[leftmargin=!,labelwidth=3.0cm,style=nextline]
+  \item[CSV] Plain-text table, commas between columns. Carries no type information, which is
+  why a column of numbers arrives as text and has to be coerced.
+  \item[Character encoding] The byte-to-character mapping. All five files here are
+  Windows-1252, not UTF-8, and three of them use bare carriage returns as line endings.
+  \item[DataFrame] pandas' in-memory table. The unit of work for everything in this project.
+  \item[NaN / NaT] pandas' ``missing number'' and ``missing date''. Deliberately contagious,
+  so that missingness forces a decision instead of quietly becoming a plausible number.
+  \item[Coercion] \code{pd.to\_numeric(col, errors='coerce')}: convert to a number, turn
+  anything unconvertible into NaN rather than crashing.
+  \item[groupby] Split a table by a key, compute per group, reassemble one row per group.
+  \item[Backend (matplotlib)] What matplotlib draws onto. \code{Agg} draws into memory
+  instead of a window, which is what makes the script runnable with no display.
+  \item[KDE] Kernel Density Estimate: a smooth curve estimating a distribution's shape. A
+  smoothed guess, not a measurement, and it will smooth fabricated data into what looks like
+  a real feature.
+  \item[Choropleth] A map that colours regions by a value. Colours by count here, not rate.
+  \item[Correlation] A number in $[-1, +1]$ for how tightly two quantities move together. Says
+  nothing about why.
+  \item[Flask] A minimal Python web framework. Maps URLs to functions.
+  \item[Jinja2 / \code{| safe}] Flask's template language, and the filter that disables its
+  automatic HTML escaping. Necessary for injecting pre-built JSON; safe here only because the
+  data is trusted and static.
+  \item[Serialization] Turning an in-memory object into bytes for the network. JSON knows few
+  types, so numpy integers need an explicit rule.
+  \item[Transitive dependency] A package installed because something else needed it. Relying
+  on one without declaring it, as this project would with \code{scipy}, breaks the day the
+  intermediate drops it.
+  \item[CDN] A third-party host serving a library over the internet. Convenient, and a runtime
+  dependency on someone else's uptime.
+\end{description}
+
+\end{document}
